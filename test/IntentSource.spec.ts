@@ -8,7 +8,11 @@ import {
   TestProver,
   Inbox,
 } from '../typechain-types'
-import { time, loadFixture } from '@nomicfoundation/hardhat-network-helpers'
+import {
+  setBalance,
+  time,
+  loadFixture,
+} from '@nomicfoundation/hardhat-network-helpers'
 import { keccak256, BytesLike, ZeroAddress } from 'ethers'
 import { encodeIdentifier, encodeTransfer } from '../utils/encode'
 import {
@@ -212,6 +216,20 @@ describe('Intent Source Test', (): void => {
           initialBalanceNative - BigInt(2) * rewardNativeEth,
       ).to.be.true
     })
+    it('does not refund unrelated ETH held by the source contract', async () => {
+      const sourceAddress = await intentSource.getAddress()
+      const unrelatedBalance = ethers.parseEther('1')
+      await setBalance(sourceAddress, unrelatedBalance)
+
+      const fundedIntent = {
+        route,
+        reward,
+      }
+      await intentSource.connect(creator).publishAndFund(fundedIntent, false)
+
+      expect(await ethers.provider.getBalance(sourceAddress)).to.eq(unrelatedBalance)
+    })
+
     it('increments counter and locks up tokens', async () => {
       const initialBalanceA = await tokenA.balanceOf(
         await intentSource.getAddress(),

@@ -106,6 +106,7 @@ contract IntentSource is IIntentSource, Semver {
     /**
      * @notice Creates and funds an intent in a single transaction
      * @param intent The complete intent struct to be published and funded
+     * @param allowPartial Whether ERC20 rewards may be funded incrementally
      * @return intentHash Hash of the created and funded intent
      */
     function publishAndFund(
@@ -125,15 +126,23 @@ contract IntentSource is IIntentSource, Semver {
             routeHash,
             intent.reward
         );
-        _fundIntent(intentHash, intent.reward, vault, msg.sender, allowPartial);
+        uint256 fundedNativeValue = _fundIntent(
+            intentHash,
+            intent.reward,
+            vault,
+            msg.sender,
+            allowPartial
+        );
+        _setFundingState(intentHash, intent.reward, vault, msg.sender, allowPartial);
 
-        _returnExcessEth(intentHash, address(this).balance);
+        _returnExcessEth(intentHash, msg.value - fundedNativeValue);
     }
 
     /**
      * @notice Funds an existing intent
      * @param routeHash Hash of the route component
      * @param reward Reward structure containing distribution details
+     * @param allowPartial Whether ERC20 rewards may be funded incrementally
      * @return intentHash Hash of the funded intent
      */
     function fund(
@@ -145,12 +154,19 @@ contract IntentSource is IIntentSource, Semver {
         intentHash = keccak256(abi.encodePacked(routeHash, rewardHash));
         VaultState memory state = vaults[intentHash].state;
 
-        _validateInitialFundingState(state, intentHash);
+        _validateFundingState(state, intentHash);
 
         address vault = _getIntentVaultAddress(intentHash, routeHash, reward);
-        _fundIntent(intentHash, reward, vault, msg.sender, allowPartial);
+        uint256 fundedNativeValue = _fundIntent(
+            intentHash,
+            reward,
+            vault,
+            msg.sender,
+            allowPartial
+        );
+        _setFundingState(intentHash, reward, vault, msg.sender, allowPartial);
 
-        _returnExcessEth(intentHash, address(this).balance);
+        _returnExcessEth(intentHash, msg.value - fundedNativeValue);
     }
 
     /**
@@ -566,6 +582,8 @@ contract IntentSource is IIntentSource, Semver {
      * @param reward Reward structure to fund
      * @param vault Address of the intent vault
      * @param funder Address providing the funds
+     * @param allowPartial Whether ERC20 rewards may be funded incrementally
+     * @return fundedNativeValue Native value transferred to the vault by this call
      */
     function _fundIntent(
         bytes32 intentHash,
@@ -573,12 +591,17 @@ contract IntentSource is IIntentSource, Semver {
         address vault,
         address funder,
         bool allowPartial
-    ) internal {
+    ) internal returns (uint256 fundedNativeValue) {
         if (reward.nativeValue > 0) {
-            if (msg.value < reward.nativeValue) {
+            fundedNativeValue = reward.nativeValue > vault.balance
+                ? reward.nativeValue - vault.balance
+                : 0;
+            if (msg.value < fundedNativeValue) {
                 revert InsufficientNativeReward(intentHash);
             }
-            payable(vault).transfer(reward.nativeValue);
+            if (fundedNativeValue > 0) {
+                payable(vault).transfer(fundedNativeValue);
+            }
         }
 
         uint256 rewardsLength = reward.tokens.length;
@@ -639,7 +662,34 @@ contract IntentSource is IIntentSource, Semver {
         }
     }
 
+    /**
+     * @dev Persists the funding state after the vault receives the current payment.
+     * @param intentHash Hash of the intent being funded
+     * @param reward Reward structure used to calculate the funding status
+     * @param vault Address of the deterministic intent vault
+     * @param funder Address that provided the current payment
+     * @param allowPartial Whether ERC20 rewards may be funded incrementally
+     */
+    function _setFundingState(
+        bytes32 intentHash,
+        Reward calldata reward,
+        address vault,
+        address funder,
+        bool allowPartial
+    ) internal {
+        VaultState memory state = vaults[intentHash].state;
+        state.status = _isRewardFunded(reward, vault)
+            ? uint8(RewardStatus.Funded)
+            : uint8(RewardStatus.PartiallyFunded);
+        state.mode = uint8(VaultMode.Fund);
+        state.allowPartialFunding = allowPartial ? 1 : 0;
+        state.usePermit = 0;
+        state.target = funder;
+        vaults[intentHash].state = state;
+    }
+
     function _fundIntentFor(
+
         VaultState memory state,
         Reward calldata reward,
         bytes32 intentHash,
@@ -650,6 +700,15 @@ contract IntentSource is IIntentSource, Semver {
         bool allowPartial
     ) internal {
         _disableNativeReward(reward, vault, intentHash);
+
+        // Permit-based funding remains idempotent for an already funded vault.
+        if (
+            state.status == uint8(RewardStatus.Funded) &&
+            _isRewardFunded(reward, vault)
+        ) {
+            return;
+        }
+
         _validateFundingState(state, intentHash);
 
         if (state.status == uint8(RewardStatus.Initial)) {
