@@ -107,8 +107,8 @@ describe('Token Security Tests', () => {
     const { intentHash } = hashIntent(intent)
     expect(await intentSource.isIntentFunded(intent)).to.be.true
 
-    // Verify reward status is correct - RewardStatus.Created = 0
-    expect(await intentSource.getRewardStatus(intentHash)).to.equal(0)
+    // Verify that a fully funded intent is stored as RewardStatus.Funded (2).
+    expect(await intentSource.getRewardStatus(intentHash)).to.equal(2)
   })
 
   it('should handle multiple token rewards correctly', async () => {
@@ -278,6 +278,6 @@ describe('Token Security Tests', () => {
 
     // Get intent hash to check reward status
     const { intentHash } = hashIntent(intent)
-    expect(await intentSource.getRewardStatus(intentHash)).to.equal(0) // Created
+    expect(await intentSource.getRewardStatus(intentHash)).to.equal(2) // Funded
   })
 })
